@@ -163,44 +163,51 @@ export default function ChatPage() {
   };
 
   const handleGeogebraSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!geogebraPrompt.trim() || !ggbAppletRef.current) return;
+  e.preventDefault();
+  if (!geogebraPrompt.trim() || !isGgbReady) return;
 
-    setIsGeogebraLoading(true);
-    setGeogebraError(null);
-    setResultCommands(null);
+  setIsGeogebraLoading(true);
+  setGeogebraError(null);
+  setResultCommands(null);
 
-    try {
-      // THAY ĐỔI TỪ SERVER ACTION SANG FETCH API PYTHON
-      const response = await fetch(`${API_BASE_URL}/api/geogebra`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ request: geogebraPrompt }),
-      });
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/geogebra`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        request: geogebraPrompt,
+        graph_type: 'function' 
+      }),
+    });
 
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.detail || 'Không thể xử lý yêu cầu.');
-      }
-      const result = await response.json();
-      // KẾT THÚC THAY ĐỔI
+    if (!response.ok) {
+      const err = await response.json();
+      throw new Error(err.detail || 'Không thể xử lý yêu cầu.');
+    }
+    
+    const result = await response.json();
 
-      if (result && result.commands) {
-        setResultCommands(result.commands.join('\n'));
-        result.commands.forEach(command => {
+    if (result && result.commands && Array.isArray(result.commands)) {
+      setResultCommands(result.commands.join('\n'));
+      result.commands.forEach((command: string) => {
+        try {
           if (ggbAppletRef.current) {
             ggbAppletRef.current.evalCommand(command);
           }
-        });
-      }
-    } catch (error: any) {
-      console.error('Error generating GeoGebra commands:', error);
-      setGeogebraError(error.message || "Không thể xử lý yêu cầu. Vui lòng thử lại.");
-    } finally {
-      setIsGeogebraLoading(false);
+        } catch (cmdError) {
+          console.error('Error executing GeoGebra command:', command, cmdError);
+        }
+      });
+    } else {
+      throw new Error('Invalid response format from server');
     }
-  };
-
+  } catch (error: any) {
+    console.error('Error generating GeoGebra commands:', error);
+    setGeogebraError(error.message || "Không thể xử lý yêu cầu. Vui lòng thử lại.");
+  } finally {
+    setIsGeogebraLoading(false);
+  }
+};
   const handleGeogebraClear = () => {
     if (ggbAppletRef.current) {
       ggbAppletRef.current.reset();
