@@ -2,17 +2,29 @@
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware  
 from pydantic import BaseModel
 
 # Import config
 from .ai_config import genai
 
 app = FastAPI(title="Math Tutor API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Trong production, chỉ định cụ thể domain
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # ===== SCHEMAS =====
+
+
 class ChatInputSchema(BaseModel):
     message: str
     history: list = []
+    media: list = [] 
 
 class GenerateExercisesInput(BaseModel):
     topic: str
@@ -29,7 +41,7 @@ class SummarizeTopicInput(BaseModel):
     detail_level: str = "medium"
 
 class GeogebraInputSchema(BaseModel):
-    description: str
+    request: str
     graph_type: str = "function"
 
 # ===== HELPER FUNCTIONS =====
