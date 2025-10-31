@@ -43,6 +43,7 @@ export default function ChatPage() {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+  
   // scroll refs
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -61,13 +62,9 @@ export default function ChatPage() {
   const [geogebraError, setGeogebraError] = useState<string | null>(null);
   const [resultCommands, setResultCommands] = useState<string | null>(null);
   const ggbContainerRef = useRef<HTMLDivElement>(null);
-  const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const { state: sidebarState } = useSidebar();
   
-  // Thêm ref để track initialization state
   const isInitializingRef = useRef(false);
-  const initTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const resizeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     setMessages([{ 
@@ -76,113 +73,93 @@ export default function ChatPage() {
     }]);
   }, []);
 
-  // Load GeoGebra script - chỉ load 1 lần
+  // Load GeoGebra script
   useEffect(() => {
-    if (!isGgbScriptLoaded) {
-      const script = document.querySelector('script[src="https://www.geogebra.org/apps/deployggb.js"]');
+    if (typeof window !== 'undefined' && !isGgbScriptLoaded) {
+      const existingScript = document.querySelector('script[src="https://www.geogebra.org/apps/deployggb.js"]');
       
-      if (script && typeof window.GGBApplet !== 'undefined') {
+      if (existingScript && typeof window.GGBApplet !== 'undefined') {
+        console.log('GeoGebra script already loaded');
         setIsGgbScriptLoaded(true);
         return;
       }
 
-      if (!script) {
-        const newScript = document.createElement('script');
-        newScript.src = 'https://www.geogebra.org/apps/deployggb.js';
-        newScript.async = true;
-        newScript.onload = () => {
-          console.log('GeoGebra script loaded');
+      if (!existingScript) {
+        const script = document.createElement('script');
+        script.src = 'https://www.geogebra.org/apps/deployggb.js';
+        script.async = true;
+        script.onload = () => {
+          console.log('GeoGebra script loaded successfully');
           setIsGgbScriptLoaded(true);
         };
-        newScript.onerror = () => {
+        script.onerror = () => {
           console.error('Failed to load GeoGebra script');
-          setGeogebraError("Không thể tải thư viện GeoGebra. Vui lòng kiểm tra kết nối mạng và thử lại.");
+          setGeogebraError("Không thể tải thư viện GeoGebra. Vui lòng kiểm tra kết nối mạng.");
         };
-        document.body.appendChild(newScript);
+        document.body.appendChild(script);
       }
     }
   }, [isGgbScriptLoaded]);
 
-  // Safe destroy helper: try GeoGebra API removal methods, remove wrapper if exists
+  // Destroy GeoGebra applet safely
   const destroyGeoGebraApplet = useCallback(() => {
+    console.log('Destroying GeoGebra applet...');
     try {
       if (ggbAppletRef.current) {
-        try {
-          if (typeof ggbAppletRef.current.removeApplet === 'function') {
-            ggbAppletRef.current.removeApplet();
-          } else if (typeof ggbAppletRef.current.remove === 'function') {
-            ggbAppletRef.current.remove();
-          } else if (typeof (ggbAppletRef.current as any).destroy === 'function') {
-            (ggbAppletRef.current as any).destroy();
-          }
-        } catch (inner) {
-          console.warn('GeoGebra applet removal method threw:', inner);
-        }
+        console.log('Removing applet instance');
         ggbAppletRef.current = null;
       }
 
       if (ggbContainerRef.current) {
-        const wrapper = ggbContainerRef.current.querySelector('.ggb-wrapper');
-        // safe removal only if wrapper is direct child to avoid removeChild error
-        if (wrapper && wrapper.parentNode === ggbContainerRef.current) {
-          ggbContainerRef.current.removeChild(wrapper);
-        } else if (wrapper && wrapper.parentNode) {
-          // defensive fallback: remove via parent if it's still in DOM
-          wrapper.parentNode.removeChild(wrapper);
-        }
+        console.log('Clearing container');
+        ggbContainerRef.current.innerHTML = '';
       }
+      
+      setIsGgbReady(false);
+      isInitializingRef.current = false;
     } catch (err) {
-      console.error('Error destroying GeoGebra applet safely:', err);
+      console.error('Error destroying GeoGebra applet:', err);
     }
   }, []);
 
-  // Initialize GeoGebra - chỉ khi script đã load
+  // Initialize GeoGebra when modal opens
   const initializeGeoGebra = useCallback(() => {
-    // Prevent multiple initializations
-    if (isInitializingRef.current || ggbAppletRef.current || !ggbContainerRef.current || !isGgbScriptLoaded) {
+    if (isInitializingRef.current || !ggbContainerRef.current || !isGgbScriptLoaded || typeof window === 'undefined') {
+      console.log('Cannot initialize:', { 
+        isInitializing: isInitializingRef.current, 
+        hasContainer: !!ggbContainerRef.current, 
+        scriptLoaded: isGgbScriptLoaded 
+      });
       return;
     }
 
-    console.log('Initializing GeoGebra...');
+    console.log('Starting GeoGebra initialization...');
     isInitializingRef.current = true;
     setIsGgbReady(false);
     setGeogebraError(null);
 
-    // Try safe destroy first (clear previous wrapper/applet)
+    // Clear any existing content
     destroyGeoGebraApplet();
 
-    // Delay initialization to ensure DOM is ready
-    initTimeoutRef.current = setTimeout(() => {
-      if (!ggbContainerRef.current) {
-        console.error('Container ref lost during initialization');
-        isInitializingRef.current = false;
-        return;
-      }
-
+    setTimeout(() => {
       try {
-        // create a dedicated wrapper for the applet so we can remove it later without touching other DOM
-        let wrapper = ggbContainerRef.current.querySelector('.ggb-wrapper') as HTMLDivElement | null;
-        if (!wrapper) {
-          wrapper = document.createElement('div');
-          wrapper.className = 'ggb-wrapper';
-          wrapper.style.width = '100%';
-          wrapper.style.height = '100%';
-          // ensure wrapper is positioned to fill container
-          wrapper.style.position = 'absolute';
-          wrapper.style.inset = '0';
-          ggbContainerRef.current.appendChild(wrapper);
-        } else {
-          wrapper.innerHTML = '';
+        if (!ggbContainerRef.current) {
+          console.error('Container disappeared during initialization');
+          isInitializingRef.current = false;
+          return;
         }
 
+        const container = ggbContainerRef.current;
         const isMobile = window.innerWidth < 640;
-        const containerWidth = wrapper.clientWidth || ggbContainerRef.current.clientWidth;
-        const containerHeight = wrapper.clientHeight || ggbContainerRef.current.clientHeight;
+        const width = container.clientWidth || 800;
+        const height = container.clientHeight || 600;
+
+        console.log('Container dimensions:', { width, height, isMobile });
 
         const parameters = {
           appName: "classic",
-          width: containerWidth || 800,
-          height: containerHeight || 600,
+          width: width,
+          height: height,
           showToolBar: !isMobile,
           showAlgebraInput: true,
           showMenuBar: !isMobile,
@@ -194,8 +171,15 @@ export default function ChatPage() {
             ggbAppletRef.current = api;
             setIsGgbReady(true);
             isInitializingRef.current = false;
+            
+            // Restore state if exists
             if (geogebraState) {
-              api.setXML(geogebraState);
+              try {
+                api.setXML(geogebraState);
+                console.log('State restored');
+              } catch (err) {
+                console.error('Failed to restore state:', err);
+              }
             }
           },
           error: (err: any) => {
@@ -205,8 +189,10 @@ export default function ChatPage() {
           }
         };
 
+        console.log('Creating GGBApplet with parameters:', parameters);
         const applet = new window.GGBApplet(parameters, true);
-        applet.inject(wrapper);
+        console.log('Injecting applet into container');
+        applet.inject(container);
 
       } catch (error) {
         console.error('Error creating GeoGebra applet:', error);
@@ -216,141 +202,77 @@ export default function ChatPage() {
     }, 100);
   }, [isGgbScriptLoaded, destroyGeoGebraApplet, geogebraState]);
 
-  // Initialize when script is ready and modal is open (since container ref depends on modal)
+  // Initialize when modal opens and script is ready
   useEffect(() => {
     if (isModalOpen && isGgbScriptLoaded && !ggbAppletRef.current && !isInitializingRef.current) {
-      initializeGeoGebra();
+      console.log('Modal opened, initializing GeoGebra...');
+      // Small delay to ensure DOM is ready
+      const timer = setTimeout(() => {
+        initializeGeoGebra();
+      }, 200);
+      return () => clearTimeout(timer);
     }
   }, [isModalOpen, isGgbScriptLoaded, initializeGeoGebra]);
-
-  // Setup ResizeObserver when GeoGebra is ready
-  useEffect(() => {
-    if (!isGgbReady || !ggbContainerRef.current || !ggbAppletRef.current) {
-      return;
-    }
-
-    // Cleanup existing observer
-    if (resizeObserverRef.current) {
-      resizeObserverRef.current.disconnect();
-    }
-
-    resizeObserverRef.current = new ResizeObserver((entries) => {
-      if (entries[0] && ggbAppletRef.current) {
-        const { width, height } = entries[0].contentRect;
-        if (width > 0 && height > 0) {
-          // Debounce resize
-          if (resizeTimeoutRef.current) {
-            clearTimeout(resizeTimeoutRef.current);
-          }
-          resizeTimeoutRef.current = setTimeout(() => {
-            if (ggbAppletRef.current) {
-              try {
-                ggbAppletRef.current.setSize(width, height);
-              } catch (err) {
-                console.warn('Failed to set GeoGebra size:', err);
-              }
-            }
-          }, 150);
-        }
-      }
-    });
-
-    // Observe container (wrapper fills it)
-    resizeObserverRef.current.observe(ggbContainerRef.current);
-
-    return () => {
-      if (resizeObserverRef.current) {
-        resizeObserverRef.current.disconnect();
-      }
-      if (resizeTimeoutRef.current) {
-        clearTimeout(resizeTimeoutRef.current);
-      }
-    };
-  }, [isGgbReady]);
 
   // Handle sidebar resize
   useEffect(() => {
     if (ggbAppletRef.current && isModalOpen && isGgbReady && ggbContainerRef.current) {
-      if (resizeTimeoutRef.current) {
-        clearTimeout(resizeTimeoutRef.current);
-      }
-      
-      resizeTimeoutRef.current = setTimeout(() => {
+      const timer = setTimeout(() => {
         if (ggbContainerRef.current && ggbAppletRef.current) {
-          const wrapper = ggbContainerRef.current.querySelector('.ggb-wrapper') as HTMLDivElement | null;
-          const width = (wrapper ? wrapper.clientWidth : ggbContainerRef.current.clientWidth);
-          const height = (wrapper ? wrapper.clientHeight : ggbContainerRef.current.clientHeight);
-          if (width > 0 && height > 0) {
-            try {
-              ggbAppletRef.current.setSize(width, height);
-            } catch (err) {
-              console.warn('Failed to set GeoGebra size on sidebar change:', err);
-            }
+          const width = ggbContainerRef.current.clientWidth;
+          const height = ggbContainerRef.current.clientHeight;
+          console.log('Resizing GeoGebra:', { width, height });
+          try {
+            ggbAppletRef.current.setSize(width, height);
+          } catch (err) {
+            console.warn('Failed to resize GeoGebra:', err);
           }
         }
-      }, 350);
+      }, 300);
+      return () => clearTimeout(timer);
     }
   }, [sidebarState, isModalOpen, isGgbReady]);
 
-  // Cleanup on modal close: save state and destroy
+  // Cleanup on modal close
   useEffect(() => {
-    if (!isModalOpen) {
-      if (ggbAppletRef.current) {
-        setGeogebraState(ggbAppletRef.current.getXML());
+    if (!isModalOpen && ggbAppletRef.current) {
+      console.log('Modal closed, saving state and cleaning up');
+      try {
+        const xml = ggbAppletRef.current.getXML();
+        setGeogebraState(xml);
+      } catch (err) {
+        console.warn('Failed to save state:', err);
       }
       destroyGeoGebraApplet();
-
-      // cleanup observers/timeouts
-      if (resizeObserverRef.current) {
-        resizeObserverRef.current.disconnect();
-      }
-      if (resizeTimeoutRef.current) {
-        clearTimeout(resizeTimeoutRef.current);
-      }
-      if (initTimeoutRef.current) {
-        clearTimeout(initTimeoutRef.current);
-      }
     }
   }, [isModalOpen, destroyGeoGebraApplet]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      try {
-        if (ggbAppletRef.current) {
-          setGeogebraState(ggbAppletRef.current.getXML());
-        }
-        destroyGeoGebraApplet();
-      } catch (err) {
-        console.warn('Error during unmount destroyGeoGebraApplet', err);
-      }
-
-      if (resizeObserverRef.current) {
-        resizeObserverRef.current.disconnect();
-      }
-      if (resizeTimeoutRef.current) {
-        clearTimeout(resizeTimeoutRef.current);
-      }
-      if (initTimeoutRef.current) {
-        clearTimeout(initTimeoutRef.current);
-      }
-      // Note: GeoGebra applet will be cleaned up by browser when DOM is removed, but we attempt an explicit remove first
+      console.log('Component unmounting, cleaning up');
+      destroyGeoGebraApplet();
     };
   }, [destroyGeoGebraApplet]);
 
   const openModal = () => {
+    console.log('Opening GeoGebra modal');
     setIsModalOpen(true);
   };
 
   const handleGeogebraSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!geogebraPrompt.trim() || !isGgbReady) return;
+    if (!geogebraPrompt.trim() || !isGgbReady) {
+      console.log('Cannot submit:', { prompt: geogebraPrompt.trim(), ready: isGgbReady });
+      return;
+    }
 
     setIsGeogebraLoading(true);
     setGeogebraError(null);
     setResultCommands(null);
 
     try {
+      console.log('Sending request to backend:', geogebraPrompt);
       const response = await fetch(`${API_BASE_URL}/api/geogebra`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -366,18 +288,20 @@ export default function ChatPage() {
       }
       
       const result = await response.json();
+      console.log('Received commands:', result);
 
       if (result && result.commands && Array.isArray(result.commands)) {
         setResultCommands(result.commands.join('\n'));
         
-        // Execute commands sequentially with error handling
+        // Execute commands
         for (const command of result.commands) {
           try {
+            console.log('Executing command:', command);
             if (ggbAppletRef.current) {
               ggbAppletRef.current.evalCommand(command);
             }
           } catch (cmdError) {
-            console.error('Error executing GeoGebra command:', command, cmdError);
+            console.error('Error executing command:', command, cmdError);
           }
         }
       } else {
@@ -395,6 +319,7 @@ export default function ChatPage() {
     if (ggbAppletRef.current) {
       try {
         ggbAppletRef.current.reset();
+        console.log('GeoGebra reset');
       } catch (error) {
         console.error('Error resetting GeoGebra:', error);
       }
@@ -434,7 +359,6 @@ export default function ChatPage() {
           const errorResult = await response.json();
           errorText = errorResult.detail || errorResult.error || errorText;
         } catch (e) {
-          console.error("Failed to parse error response JSON", e);
           errorText = response.statusText;
         }
         throw new Error(errorText);
@@ -509,7 +433,7 @@ export default function ChatPage() {
     setAttachedFiles(prev => prev.filter((_, i) => i !== index));
   };
 
-  // Auto-scroll to bottom using sentinel endRef
+  // Auto-scroll
   useEffect(() => {
     if (!scrollAreaRef.current) return;
     
@@ -526,7 +450,7 @@ export default function ChatPage() {
     return () => clearTimeout(t);
   }, [messages]);
 
-  // Adjust padding bottom of scroll area based on input container height
+  // Adjust padding
   useEffect(() => {
     const adjustPadding = () => {
       if (inputContainerRef.current && scrollAreaRef.current) {
@@ -538,7 +462,6 @@ export default function ChatPage() {
     adjustPadding();
     window.addEventListener('resize', adjustPadding);
 
-    // Also adjust when textarea resizes
     const observer = new ResizeObserver(adjustPadding);
     if (textareaRef.current) {
       observer.observe(textareaRef.current);
@@ -601,8 +524,7 @@ export default function ChatPage() {
         <Sparkles className="w-6 h-6 text-orange-200 animate-pulse" />
       </header>
 
-      {/* Scrollable chat area with sentinel for reliable auto-scroll */}
-       <div className="flex-1 overflow-y-auto bg-gradient-to-b from-white to-blue-50" ref={scrollAreaRef}>
+      <div className="flex-1 overflow-y-auto bg-gradient-to-b from-white to-blue-50" ref={scrollAreaRef}>
         <div className="p-6 flex flex-col gap-6">
             {messages.map((message, index) => (
               <div key={index} className={cn("flex items-start gap-3", message.isUser ? "justify-end" : "justify-start")}>
@@ -651,14 +573,11 @@ export default function ChatPage() {
                 )}
               </div>
             ))}
-            {/* sentinel element for reliable scrolling */}
             <div ref={endRef} />
            </div>
       </div>
 
-      {/* Fixed input form at bottom */}
       <div ref={inputContainerRef} className="fixed bottom-0 left-0 right-0 p-4 sm:px-6 sm:py-5 bg-white border-t border-blue-100 z-10">
-
         {attachedFiles.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-3">
             {attachedFiles.map((file, index) => (
@@ -749,12 +668,16 @@ export default function ChatPage() {
         </p>
       </div>
 
-      <Button onClick={openModal} size="lg" className="h-auto fixed bottom-28 right-6 w-14 h-14 bg-gradient-to-br from-blue-500 to-cyan-500 text-white rounded-full shadow-lg hover:shadow-2xl transition-all duration-300 flex items-center justify-center z-50 cursor-grab active:cursor-grabbing hover:scale-110">
+      <Button 
+        onClick={openModal} 
+        size="lg" 
+        className="fixed bottom-28 right-6 w-14 h-14 bg-gradient-to-br from-blue-500 to-cyan-500 text-white rounded-full shadow-lg hover:shadow-2xl transition-all duration-300 flex items-center justify-center z-50 hover:scale-110"
+      >
         <Compass className="w-7 h-7" />
       </Button>
 
       <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
-        <DialogContent className="max-w-7xl h-[95vh] flex flex-col p-0 gap-0 border-2 border-blue-200">
+        <DialogContent className="max-w-7xl h-[90vh] flex flex-col p-0 gap-0 border-2 border-blue-200">
           <DialogHeader className="bg-gradient-to-r from-blue-500 to-cyan-500 px-6 py-4 flex flex-row items-center justify-between flex-shrink-0">
             <div className="flex items-center gap-3 min-w-0">
               <div className="w-10 h-10 bg-white rounded-full flex items-center justify-center flex-shrink-0">
@@ -762,22 +685,20 @@ export default function ChatPage() {
               </div>
               <DialogTitle className="text-xl font-bold text-white truncate">GeoGebra AI</DialogTitle>
             </div>
-            <Button variant="ghost" size="icon" onClick={() => setIsModalOpen(false)} className="text-white hover:text-blue-100 static right-auto top-auto">
-              <X />
-            </Button>
           </DialogHeader>
 
-          <div className="flex-1 flex flex-col sm:flex-row overflow-hidden">
-            <div className="w-full sm:w-96 bg-gradient-to-b from-blue-50 to-white border-b sm:border-b-0 sm:border-r border-blue-200 flex flex-col">
-              <div className="px-4 py-3 border-b border-blue-200 bg-white">
+          <div className="flex-1 flex flex-col lg:flex-row overflow-hidden min-h-0">
+            {/* Control Panel */}
+            <div className="w-full lg:w-96 bg-gradient-to-b from-blue-50 to-white border-b lg:border-b-0 lg:border-r border-blue-200 flex flex-col overflow-hidden">
+              <div className="px-4 py-3 border-b border-blue-200 bg-white flex-shrink-0">
                 <h3 className="text-base font-semibold text-gray-800 flex items-center gap-2">
                   <Sparkles className="text-blue-500 w-5 h-5" />
                   Vẽ hình tự động
                 </h3>
               </div>
 
-              <ScrollArea className="flex-1">
-                <form onSubmit={handleGeogebraSubmit} className="p-4 space-y-4">
+              <ScrollArea className="flex-1 min-h-0">
+                <div className="p-4 space-y-4">
                   <Card className="bg-blue-50 border border-blue-100">
                     <CardHeader className='p-3 pb-2'>
                       <CardTitleComponent className="text-sm text-blue-800">💡 Ví dụ:</CardTitleComponent>
@@ -791,59 +712,61 @@ export default function ChatPage() {
                     </CardContent>
                   </Card>
 
-                  <div>
-                    <label htmlFor='ggb-ai-input' className="block text-sm font-medium text-gray-700 mb-2">
-                      Nhập yêu cầu vẽ hình:
-                    </label>
-                    <Textarea
-                      id="ggb-ai-input"
-                      value={geogebraPrompt}
-                      onChange={(e) => setGeogebraPrompt(e.target.value)}
-                      placeholder="VD: Vẽ đồ thị hàm số y = x² - 2x + 1"
-                      className="h-32 text-sm border-2 border-blue-200 rounded-lg focus:border-blue-400"
-                      disabled={isGeogebraLoading || !isGgbReady}
-                    />
-                  </div>
-                  
-                  <Button
-                    type="submit"
-                    disabled={isGeogebraLoading || !geogebraPrompt.trim() || !isGgbReady}
-                    className="w-full bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white font-semibold py-3 rounded-lg"
-                  >
-                    {isGeogebraLoading ? (
-                      <>
-                        <Loader className="animate-spin mr-2" />
-                        Đang xử lý...
-                      </>
-                    ) : (
-                      <>
-                        <Send className="mr-2" />
-                        Vẽ hình
-                      </>
-                    )}
-                  </Button>
+                  <form onSubmit={handleGeogebraSubmit} className="space-y-4">
+                    <div>
+                      <label htmlFor='ggb-ai-input' className="block text-sm font-medium text-gray-700 mb-2">
+                        Nhập yêu cầu vẽ hình:
+                      </label>
+                      <Textarea
+                        id="ggb-ai-input"
+                        value={geogebraPrompt}
+                        onChange={(e) => setGeogebraPrompt(e.target.value)}
+                        placeholder="VD: Vẽ đồ thị hàm số y = x² - 2x + 1"
+                        className="h-32 text-sm border-2 border-blue-200 rounded-lg focus:border-blue-400"
+                        disabled={isGeogebraLoading || !isGgbReady}
+                      />
+                    </div>
+                    
+                    <Button
+                      type="submit"
+                      disabled={isGeogebraLoading || !geogebraPrompt.trim() || !isGgbReady}
+                      className="w-full bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white font-semibold py-3 rounded-lg"
+                    >
+                      {isGeogebraLoading ? (
+                        <>
+                          <Loader className="animate-spin mr-2" />
+                          Đang xử lý...
+                        </>
+                      ) : (
+                        <>
+                          <Send className="mr-2" />
+                          Vẽ hình
+                        </>
+                      )}
+                    </Button>
 
-                  {geogebraError && (
-                    <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
-                      {geogebraError}
-                    </div>
-                  )}
-                  
-                  {resultCommands && (
-                    <div className="bg-green-50 border border-green-200 rounded-lg p-3">
-                      <p className="text-sm font-medium text-green-800 mb-1 flex items-center gap-2">
-                        <Code className="w-4 h-4" /> 
-                        Lệnh GeoGebra:
-                      </p>
-                      <pre className="text-xs bg-white p-2 rounded border border-green-300 overflow-x-auto text-gray-800">
-                        {resultCommands}
-                      </pre>
-                    </div>
-                  )}
-                </form>
+                    {geogebraError && (
+                      <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+                        {geogebraError}
+                      </div>
+                    )}
+                    
+                    {resultCommands && (
+                      <div className="bg-green-50 border border-green-200 rounded-lg p-3">
+                        <p className="text-sm font-medium text-green-800 mb-1 flex items-center gap-2">
+                          <Code className="w-4 h-4" /> 
+                          Lệnh GeoGebra:
+                        </p>
+                        <pre className="text-xs bg-white p-2 rounded border border-green-300 overflow-x-auto text-gray-800">
+                          {resultCommands}
+                        </pre>
+                      </div>
+                    )}
+                  </form>
+                </div>
               </ScrollArea>
               
-              <div className='p-4 border-t border-blue-200'>
+              <div className='p-4 border-t border-blue-200 flex-shrink-0'>
                 <Button
                   onClick={handleGeogebraClear}
                   variant="outline"
@@ -856,41 +779,47 @@ export default function ChatPage() {
               </div>
             </div>
 
-            <div className="flex-1 p-4 bg-gradient-to-b from-white to-blue-50 overflow-hidden flex flex-col">
+            {/* GeoGebra Canvas */}
+            <div className="flex-1 p-4 bg-gradient-to-b from-white to-blue-50 overflow-hidden flex flex-col min-h-0">
               <div 
-                ref={ggbContainerRef} 
-                className="w-full h-full min-h-[300px] bg-white rounded-xl shadow-inner border border-blue-100 relative"
+                ref={ggbContainerRef}
+                id="geogebra-container"
+                className="w-full h-full min-h-[400px] bg-white rounded-xl shadow-inner border border-blue-100 relative overflow-hidden"
               >
+                {/* Loading/Error Overlay */}
                 {(!isGgbScriptLoaded || !isGgbReady || geogebraError) && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-gray-100/50 z-10 rounded-xl">
-                    <div className='flex flex-col items-center gap-4 text-center p-4'>
+                  <div className="absolute inset-0 flex items-center justify-center bg-gray-100/80 backdrop-blur-sm z-10 rounded-xl">
+                    <div className='flex flex-col items-center gap-4 text-center p-4 max-w-md'>
                       {geogebraError ? (
                         <>
                           <X className="text-destructive" size={48} />
-                          <p className='text-destructive-foreground font-semibold'>Lỗi tải GeoGebra</p>
+                          <p className='text-destructive-foreground font-semibold text-lg'>Lỗi tải GeoGebra</p>
                           <p className='text-muted-foreground text-sm'>{geogebraError}</p>
                           <Button 
                             onClick={() => {
                               setGeogebraError(null);
                               setIsGgbScriptLoaded(false);
-                              // ensure previous applet/wrapper removed before retry
-                              try {
-                                destroyGeoGebraApplet();
-                              } catch (err) {
-                                console.warn('Destroy on retry failed', err);
-                              }
-                              ggbAppletRef.current = null;
-                              isInitializingRef.current = false;
+                              destroyGeoGebraApplet();
+                              // Trigger reload by closing and reopening modal
+                              setIsModalOpen(false);
+                              setTimeout(() => setIsModalOpen(true), 100);
                             }}
                             variant="outline"
                           >
                             Thử lại
                           </Button>
                         </>
+                      ) : !isGgbScriptLoaded ? (
+                        <>
+                          <Loader className="animate-spin text-primary" size={48} />
+                          <p className='text-muted-foreground font-medium'>Đang tải thư viện GeoGebra...</p>
+                          <p className='text-muted-foreground text-xs'>Vui lòng đợi trong giây lát</p>
+                        </>
                       ) : (
                         <>
                           <Loader className="animate-spin text-primary" size={48} />
-                          <p className='text-muted-foreground'>Đang tải công cụ vẽ hình...</p>
+                          <p className='text-muted-foreground font-medium'>Đang khởi tạo công cụ vẽ hình...</p>
+                          <p className='text-muted-foreground text-xs'>Sắp hoàn tất</p>
                         </>
                       )}
                     </div>
