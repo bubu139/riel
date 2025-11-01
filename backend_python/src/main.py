@@ -9,11 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import PyPDF2
+from docx import Document
 
 # Import config
 from .ai_config import genai
 
-# ===== PDF PROCESSING =====
+# ===== DOCUMENT PROCESSING =====
 
 def extract_text_from_pdf(pdf_path: str) -> str:
     """Extract text from a PDF file"""
@@ -28,24 +29,55 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         print(f"Error reading PDF {pdf_path}: {e}")
         return ""
 
+def extract_text_from_word(docx_path: str) -> str:
+    """Extract text from a Word (.docx) file"""
+    try:
+        doc = Document(docx_path)
+        text = ""
+        for paragraph in doc.paragraphs:
+            text += paragraph.text + "\n"
+        return text
+    except Exception as e:
+        print(f"Error reading Word file {docx_path}: {e}")
+        return ""
+
+def extract_text_from_file(file_path: str) -> str:
+    """Extract text from PDF or Word file based on extension"""
+    file_path_obj = Path(file_path)
+    extension = file_path_obj.suffix.lower()
+    
+    if extension == '.pdf':
+        return extract_text_from_pdf(file_path)
+    elif extension in ['.docx', '.doc']:
+        return extract_text_from_word(file_path)
+    else:
+        print(f"Unsupported file format: {extension}")
+        return ""
+
 def load_reference_materials(folder_path: str, max_files: int = 5) -> str:
-    """Load and combine text from multiple PDF files in a folder"""
+    """Load and combine text from multiple PDF/Word files in a folder"""
     folder = Path(folder_path)
     if not folder.exists():
         print(f"Warning: Folder {folder_path} does not exist")
         return ""
     
-    pdf_files = list(folder.glob("*.pdf"))[:max_files]
+    # Get both PDF and Word files
+    pdf_files = list(folder.glob("*.pdf"))
+    docx_files = list(folder.glob("*.docx"))
+    doc_files = list(folder.glob("*.doc"))
     
-    if not pdf_files:
-        print(f"Warning: No PDF files found in {folder_path}")
+    all_files = (pdf_files + docx_files + doc_files)[:max_files]
+    
+    if not all_files:
+        print(f"Warning: No PDF or Word files found in {folder_path}")
         return ""
     
     combined_text = ""
-    for pdf_file in pdf_files:
-        print(f"Loading: {pdf_file.name}")
-        text = extract_text_from_pdf(str(pdf_file))
-        combined_text += f"\n\n=== TÀI LIỆU: {pdf_file.name} ===\n{text}\n"
+    for file in all_files:
+        print(f"📄 Loading: {file.name}")
+        text = extract_text_from_file(str(file))
+        if text:
+            combined_text += f"\n\n=== TÀI LIỆU: {file.name} ===\n{text}\n"
     
     return combined_text
 
@@ -183,8 +215,9 @@ async def stream_generator(text_generator):
 async def root():
     return {
         "status": "ok", 
-        "message": "Math Tutor API with PDF Reference Integration",
+        "message": "Math Tutor API with PDF & Word Support",
         "model": "gemini-2.0-flash-exp",
+        "supported_formats": ["PDF (.pdf)", "Word (.docx, .doc)"],
         "endpoints": [
             "/api/chat",
             "/api/generate-exercises", 
@@ -231,7 +264,7 @@ async def handle_chat(request: ChatInputSchema):
 
 @app.post("/api/generate-exercises")
 async def handle_generate_exercises(request: GenerateExercisesInput):
-    """Generate math exercises based on PDF reference materials"""
+    """Generate math exercises based on PDF/Word reference materials"""
     try:
         print(f"📚 Loading exercise reference materials for topic: {request.topic}")
         reference_text = load_reference_materials(str(EXERCISES_FOLDER), max_files=3)
@@ -286,7 +319,7 @@ Trả về JSON format:
 
 @app.post("/api/generate-test")
 async def handle_generate_test(request: GenerateTestInput):
-    """Generate a test based on PDF reference materials"""
+    """Generate a test based on PDF/Word reference materials"""
     try:
         print(f"📝 Loading test reference materials for topic: {request.topic}")
         reference_text = load_reference_materials(str(TESTS_FOLDER), max_files=3)
@@ -305,24 +338,67 @@ async def handle_generate_test(request: GenerateTestInput):
         prompt = f"""Tạo đề kiểm tra về chủ đề: "{request.topic}"
 Độ khó: {request.difficulty}
 
-CẤU TRÚC:
-- PHẦN 1: 4 câu trắc nghiệm
-- PHẦN 2: 1 câu đúng/sai (4 mệnh đề)
-- PHẦN 3: 1 câu trả lời ngắn
+Độ khó: {request.difficulty}
+
+CẤU TRÚC BẮT BUỘC (JSON thuần túy, không text thừa):
+{{
+  "test": {{
+    "title": "Tiêu đề đề thi",
+    "instructions": "Hướng dẫn làm bài",
+    "sections": [
+      {{
+        "part": 1,
+        "type": "trắc nghiệm",
+        "questions": [
+          {{
+            "id": "q1",
+            "question": "Câu hỏi",
+            "options": ["A", "B", "C", "D"],
+            "correct": "A"
+          }}
+        ]
+      }},
+      {{
+        "part": 2,
+        "type": "đúng/sai",
+        "statements": ["Mệnh đề 1", "Mệnh đề 2"]
+      }},
+      {{
+        "part": 3,
+        "type": "trả lời ngắn",
+        "questions": [
+          {{
+            "id": "q1",
+            "question": "Câu hỏi",
+            "solution": "Lời giải"
+          }}
+        ]
+      }}
+    ]
+  }}
+}}
 
 TÀI LIỆU THAM KHẢO:
 {reference_text if reference_text else "Không có tài liệu. Tạo đề theo chuẩn THPT QG."}
 
-Trả về JSON với cấu trúc đầy đủ."""
-        
+Đảm bảo JSON hợp lệ 100%."""
+
         response = model.generate_content(prompt)
-        result = json.loads(response.text)
+        
+        try:
+            result = json.loads(response.text)
+        except json.JSONDecodeError as e:
+            print(f"JSON parse error: {e}. Raw response: {response.text}")
+            raise HTTPException(status_code=500, detail="AI response không phải JSON hợp lệ. Thử lại.")
+        
+        # SỬA: Wrap result vào "test" nếu chưa có
+        test_data = result.get("test", result)  # Fallback nếu model không wrap
         
         return {
             "topic": request.topic,
             "difficulty": request.difficulty,
             "has_reference": bool(reference_text),
-            **result
+            "test": test_data
         }
     except Exception as e:
         print(f"Generate test error: {e}")
@@ -351,20 +427,44 @@ async def handle_summarize_topic(request: SummarizeTopicInput):
         
         detail_instruction = detail_map.get(request.detail_level, "đầy đủ")
         
-        prompt = f"""Tóm tắt {detail_instruction} về: "{request.topic}"
+        prompt = f"""Tạo {request.count} bài tập toán học về chủ đề: "{request.topic}"
+Độ khó: {request.difficulty}
 
-Trả về JSON:
+YÊU CẦU:
+- Bài tập phải BÁM SÁT các dạng bài trong tài liệu tham khảo
+- Đảm bảo độ chính xác theo chương trình Toán 12 Việt Nam
+- Cung cấp lời giải chi tiết từng bước
+
+TÀI LIỆU THAM KHẢO:
+{reference_text if reference_text else "Không có tài liệu. Tạo bài tập theo kiến thức chuẩn."}
+
+Trả về JSON thuần túy (không text thừa):
 {{
-  "summary": "Nội dung tóm tắt"
+  "exercises": [
+    {{
+      "id": "ex1",
+      "question": "Đề bài",
+      "solution": "Lời giải",
+      "answer": "Đáp án"
+    }}
+  ]
 }}"""
         
         response = model.generate_content(prompt)
-        result = json.loads(response.text)
+        try:
+            result = json.loads(response.text)
+        except json.JSONDecodeError as e:
+            print(f"JSON parse error: {e}. Raw response: {response.text}")
+            raise HTTPException(status_code=500, detail="AI response không phải JSON hợp lệ. Thử lại.")
         
+        # SỬA: Wrap nếu cần (giả sử frontend expect data.exercises)
+        exercises_data = result.get("exercises", [])
         return {
             "topic": request.topic,
-            "detail_level": request.detail_level,
-            **result
+            "difficulty": request.difficulty,
+            "count": request.count,
+            "has_reference": bool(reference_text),
+            "exercises": exercises_data
         }
     except Exception as e:
         print(f"Summarize topic error: {e}")
@@ -410,7 +510,8 @@ if __name__ == "__main__":
     print("="*60)
     print(f"📁 Exercises folder: {EXERCISES_FOLDER}")
     print(f"📁 Tests folder: {TESTS_FOLDER}")
-    print("\n⚠️  NOTE: Place your PDF files in these folders")
+    print("\n📄 Supported formats: PDF (.pdf), Word (.docx, .doc)")
+    print("⚠️  NOTE: Place your files in these folders")
     print("="*60 + "\n")
     
     uvicorn.run(app, host="0.0.0.0", port=8000)
