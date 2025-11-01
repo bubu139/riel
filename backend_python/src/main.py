@@ -1,14 +1,65 @@
 # src/main.py
 import uvicorn
 import json
+import os
+from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware  
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List, Optional
+import PyPDF2
 
 # Import config
 from .ai_config import genai
+
+# ===== PDF PROCESSING =====
+
+def extract_text_from_pdf(pdf_path: str) -> str:
+    """Extract text from a PDF file"""
+    try:
+        with open(pdf_path, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            text = ""
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
+        return text
+    except Exception as e:
+        print(f"Error reading PDF {pdf_path}: {e}")
+        return ""
+
+def load_reference_materials(folder_path: str, max_files: int = 5) -> str:
+    """Load and combine text from multiple PDF files in a folder"""
+    folder = Path(folder_path)
+    if not folder.exists():
+        print(f"Warning: Folder {folder_path} does not exist")
+        return ""
+    
+    pdf_files = list(folder.glob("*.pdf"))[:max_files]
+    
+    if not pdf_files:
+        print(f"Warning: No PDF files found in {folder_path}")
+        return ""
+    
+    combined_text = ""
+    for pdf_file in pdf_files:
+        print(f"Loading: {pdf_file.name}")
+        text = extract_text_from_pdf(str(pdf_file))
+        combined_text += f"\n\n=== TÀI LIỆU: {pdf_file.name} ===\n{text}\n"
+    
+    return combined_text
+
+# ===== PATHS CONFIGURATION =====
+
+BASE_DIR = Path(__file__).parent.parent
+EXERCISES_FOLDER = BASE_DIR / "reference_materials" / "exercises"
+TESTS_FOLDER = BASE_DIR / "reference_materials" / "tests"
+
+EXERCISES_FOLDER.mkdir(parents=True, exist_ok=True)
+TESTS_FOLDER.mkdir(parents=True, exist_ok=True)
+
+print(f"📁 Exercises folder: {EXERCISES_FOLDER}")
+print(f"📁 Tests folder: {TESTS_FOLDER}")
 
 # ===== SYSTEM INSTRUCTIONS =====
 
@@ -67,122 +118,25 @@ GEOGEBRA_SYSTEM_INSTRUCTION = """Bạn là một chuyên gia GeoGebra, chuyên c
 - Tránh xung đột tên biến
 - Các lệnh phải độc lập, không phụ thuộc biến ngoài
 
-📊 VÍ DỤ:
-Input: "Vẽ parabol y = x^2 - 4x + 3"
-Output: {"commands": ["f(x) = x^2 - 4*x + 3"]}
-
-Input: "Vẽ tam giác ABC với A(1,2), B(3,4), C(5,1)"
-Output: {"commands": ["A = (1, 2)", "B = (3, 4)", "C = (5, 1)", "Polygon(A, B, C)"]}
-
-Input: "Vẽ đường tròn tâm O bán kính 3"
-Output: {"commands": ["O = (0, 0)", "Circle(O, 3)"]}
-
 ⚠️ LƯU Ý:
 - KHÔNG thêm giải thích, chỉ trả về lệnh
 - KHÔNG sử dụng ký tự đặc biệt Việt Nam trong tên biến
 - Đảm bảo cú pháp 100% chính xác
-- Trả về JSON object với key "commands" là array
 
-🎯 OUTPUT FORMAT:
-{
-  "commands": ["command1", "command2", ...]
-}"""
+🎯 OUTPUT FORMAT: {"commands": ["command1", "command2", ...]}"""
 
-EXERCISE_SYSTEM_INSTRUCTION = """Bạn là một chuyên gia biên soạn đề thi toán THPT Quốc gia Việt Nam.
+EXERCISE_SYSTEM_INSTRUCTION = """Bạn là một chuyên gia biên soạn bài tập toán THPT lớp 12 Việt Nam."""
 
-🎯 NHIỆM VỤ:
-- Tạo bài tập chất lượng cao về chủ đề được yêu cầu
-- Đảm bảo độ khó phù hợp với trình độ lớp 12
-- Cung cấp lời giải chi tiết, dễ hiểu
+TEST_SYSTEM_INSTRUCTION = """Bạn là một chuyên gia biên soạn đề kiểm tra/thi THPT Quốc gia môn Toán."""
 
-📝 CẤU TRÚC BÀI TẬP:
-Mỗi bài tập phải có:
-1. **Đề bài**: Rõ ràng, không gây nhầm lẫn, sử dụng LaTeX cho công thức
-2. **Hướng dẫn giải**: Từng bước logic, giải thích tại sao
-3. **Đáp án**: Chính xác, có đơn vị (nếu cần)
-4. **Gợi ý**: Tips để giải nhanh hoặc tránh sai lầm
-
-💡 YÊU CẦU:
-- Độ khó tăng dần (dễ → trung bình → khó)
-- Đa dạng dạng bài
-- Gần gũi với đề thi thật
-- Sử dụng ngôn ngữ Việt Nam chuẩn
-- Sử dụng LaTeX cho công thức toán: $x^2$ hoặc $$x^2 + y^2 = r^2$$
-
-📊 OUTPUT FORMAT (JSON):
-{
-  "exercises": [
-    {
-      "id": "ex1",
-      "question": "Đề bài với LaTeX: $x^2 + 2x + 1 = 0$",
-      "solution": "**Bước 1:** Nhận dạng dạng bài\\n\\n**Bước 2:** Áp dụng công thức...",
-      "answer": "Đáp án cuối cùng",
-      "hint": "Gợi ý hữu ích"
-    }
-  ]
-}"""
-
-TEST_SYSTEM_INSTRUCTION = """Bạn là một chuyên gia biên soạn đề thi THPT Quốc gia môn Toán.
-
-🎯 NHIỆM VỤ:
-- Tạo đề thi đầy đủ theo cấu trúc chuẩn
-- Đảm bảo độ khó phân bố hợp lý
-- Câu hỏi đa dạng, bao phủ kiến thức
-
-📝 CẤU TRÚC ĐỀ THI:
-1. **Phần 1: Trắc nghiệm** (4 câu)
-   - Mỗi câu 4 đáp án A, B, C, D
-   - Chỉ 1 đáp án đúng
-   - Độ khó: 2 dễ, 1 trung bình, 1 khó
-
-2. **Phần 2: Đúng/Sai** (1 câu - 4 mệnh đề)
-   - 4 mệnh đề liên quan cùng chủ đề
-   - Mỗi mệnh đề đúng hoặc sai
-   - Độ khó: 2 dễ, 2 trung bình
-
-3. **Phần 3: Trả lời ngắn** (1 câu)
-   - Đáp án là số (tối đa 6 ký tự)
-   - Có thể là số nguyên, thập phân, hoặc âm
-
-💡 YÊU CẦU:
-- Sử dụng LaTeX cho công thức
-- Đáp án chính xác tuyệt đối
-- Các đáp án nhiễu hợp lý (sai lầm phổ biến)
-- Ngôn ngữ rõ ràng, không gây nhầm lẫn
-
-📊 OUTPUT FORMAT: Tuân thủ schema test_schema.py với cấu trúc JSON đầy đủ"""
-
-SUMMARIZE_SYSTEM_INSTRUCTION = """Bạn là một giảng viên toán học chuyên tóm tắt kiến thức một cách súc tích.
-
-🎯 NHIỆM VỤ:
-- Tóm tắt chủ đề toán học một cách dễ hiểu
-- Nêu bật các điểm then chốt
-- Cung cấp công thức quan trọng
-
-📝 CẤU TRÚC TÓM TẮT:
-1. **Định nghĩa**: Khái niệm cốt lõi
-2. **Công thức chính**: LaTeX format
-3. **Tính chất quan trọng**: Liệt kê rõ ràng
-4. **Phương pháp giải**: Các bước cơ bản
-5. **Lưu ý**: Các điểm hay nhầm lẫn
-
-💡 YÊU CẦU:
-- Ngắn gọn nhưng đầy đủ
-- Dùng bullet points và số thứ tự
-- LaTeX cho công thức: $x^2$ hoặc $$\\int f(x)dx$$
-- Dễ đọc, dễ nhớ
-
-📊 OUTPUT FORMAT (JSON):
-{
-  "summary": "Nội dung tóm tắt với markdown và LaTeX"
-}"""
+SUMMARIZE_SYSTEM_INSTRUCTION = """Bạn là một giảng viên toán học chuyên tóm tắt kiến thức một cách súc tích."""
 
 # ===== FASTAPI APP =====
 
 app = FastAPI(title="Math Tutor API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Trong production, chỉ định cụ thể domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -201,12 +155,11 @@ class ChatInputSchema(BaseModel):
 class GenerateExercisesInput(BaseModel):
     topic: str
     difficulty: str = "medium"
-    count: int = 5
+    count: int = 3
 
 class GenerateTestInput(BaseModel):
     topic: str
     difficulty: str = "medium"
-    question_count: int = 10
 
 class SummarizeTopicInput(BaseModel):
     topic: str
@@ -230,7 +183,7 @@ async def stream_generator(text_generator):
 async def root():
     return {
         "status": "ok", 
-        "message": "Math Tutor API is running with Gemini 2.0 Flash",
+        "message": "Math Tutor API with PDF Reference Integration",
         "model": "gemini-2.0-flash-exp",
         "endpoints": [
             "/api/chat",
@@ -238,7 +191,11 @@ async def root():
             "/api/generate-test",
             "/api/summarize-topic",
             "/api/geogebra"
-        ]
+        ],
+        "reference_folders": {
+            "exercises": str(EXERCISES_FOLDER),
+            "tests": str(TESTS_FOLDER)
+        }
     }
 
 @app.post("/api/chat")
@@ -258,20 +215,11 @@ async def handle_chat(request: ChatInputSchema):
             system_instruction=CHAT_SYSTEM_INSTRUCTION
         )
         
-        # Build prompt with media if provided
         if request.media:
-            # For multimodal input with images
             prompt_parts = [request.message]
-            # Note: You may need to handle media URLs differently based on Gemini API requirements
-            response = model.generate_content(
-                prompt_parts,
-                stream=True
-            )
+            response = model.generate_content(prompt_parts, stream=True)
         else:
-            response = model.generate_content(
-                request.message,
-                stream=True
-            )
+            response = model.generate_content(request.message, stream=True)
         
         return StreamingResponse(
             stream_generator(response),
@@ -283,8 +231,11 @@ async def handle_chat(request: ChatInputSchema):
 
 @app.post("/api/generate-exercises")
 async def handle_generate_exercises(request: GenerateExercisesInput):
-    """Generate math exercises"""
+    """Generate math exercises based on PDF reference materials"""
     try:
+        print(f"📚 Loading exercise reference materials for topic: {request.topic}")
+        reference_text = load_reference_materials(str(EXERCISES_FOLDER), max_files=3)
+        
         generation_config = {
             "temperature": 0.7,
             "response_mime_type": "application/json",
@@ -299,15 +250,22 @@ async def handle_generate_exercises(request: GenerateExercisesInput):
         prompt = f"""Tạo {request.count} bài tập toán học về chủ đề: "{request.topic}"
 Độ khó: {request.difficulty}
 
-Trả về JSON với format:
+YÊU CẦU:
+- Bài tập phải BÁM SÁT các dạng bài trong tài liệu tham khảo
+- Đảm bảo độ chính xác theo chương trình Toán 12 Việt Nam
+- Cung cấp lời giải chi tiết từng bước
+
+TÀI LIỆU THAM KHẢO:
+{reference_text if reference_text else "Không có tài liệu. Tạo bài tập theo kiến thức chuẩn."}
+
+Trả về JSON format:
 {{
   "exercises": [
     {{
       "id": "ex1",
-      "question": "Đề bài (sử dụng LaTeX)",
-      "solution": "Lời giải chi tiết",
-      "answer": "Đáp án",
-      "hint": "Gợi ý"
+      "question": "Đề bài",
+      "solution": "Lời giải",
+      "answer": "Đáp án"
     }}
   ]
 }}"""
@@ -319,6 +277,7 @@ Trả về JSON với format:
             "topic": request.topic,
             "difficulty": request.difficulty,
             "count": request.count,
+            "has_reference": bool(reference_text),
             **result
         }
     except Exception as e:
@@ -327,8 +286,11 @@ Trả về JSON với format:
 
 @app.post("/api/generate-test")
 async def handle_generate_test(request: GenerateTestInput):
-    """Generate a test with multiple questions"""
+    """Generate a test based on PDF reference materials"""
     try:
+        print(f"📝 Loading test reference materials for topic: {request.topic}")
+        reference_text = load_reference_materials(str(TESTS_FOLDER), max_files=3)
+        
         generation_config = {
             "temperature": 0.6,
             "response_mime_type": "application/json",
@@ -340,60 +302,28 @@ async def handle_generate_test(request: GenerateTestInput):
             system_instruction=TEST_SYSTEM_INSTRUCTION
         )
         
-        prompt = f"""Tạo đề thi về chủ đề: "{request.topic}"
+        prompt = f"""Tạo đề kiểm tra về chủ đề: "{request.topic}"
 Độ khó: {request.difficulty}
 
-Cấu trúc đề thi:
-- 4 câu trắc nghiệm (4 đáp án, 1 đúng)
-- 1 câu đúng/sai (4 mệnh đề)
-- 1 câu trả lời ngắn (đáp án số, max 6 ký tự)
+CẤU TRÚC:
+- PHẦN 1: 4 câu trắc nghiệm
+- PHẦN 2: 1 câu đúng/sai (4 mệnh đề)
+- PHẦN 3: 1 câu trả lời ngắn
 
-Trả về JSON theo format:
-{{
-  "title": "Đề kiểm tra...",
-  "parts": {{
-    "multipleChoice": {{
-      "title": "Phần 1: Trắc nghiệm",
-      "questions": [
-        {{
-          "id": "mc1",
-          "type": "multiple-choice",
-          "prompt": "Câu hỏi (LaTeX)",
-          "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
-          "answer": 0
-        }}
-      ]
-    }},
-    "trueFalse": {{
-      "title": "Phần 2: Đúng/Sai",
-      "questions": [
-        {{
-          "id": "tf1",
-          "type": "true-false",
-          "prompt": "Cho biết các mệnh đề sau đúng hay sai:",
-          "statements": ["Mệnh đề 1", "Mệnh đề 2", "Mệnh đề 3", "Mệnh đề 4"],
-          "answer": [true, false, true, false]
-        }}
-      ]
-    }},
-    "shortAnswer": {{
-      "title": "Phần 3: Trả lời ngắn",
-      "questions": [
-        {{
-          "id": "sa1",
-          "type": "short-answer",
-          "prompt": "Câu hỏi (LaTeX)",
-          "answer": "123.45"
-        }}
-      ]
-    }}
-  }}
-}}"""
+TÀI LIỆU THAM KHẢO:
+{reference_text if reference_text else "Không có tài liệu. Tạo đề theo chuẩn THPT QG."}
+
+Trả về JSON với cấu trúc đầy đủ."""
         
         response = model.generate_content(prompt)
         result = json.loads(response.text)
         
-        return result
+        return {
+            "topic": request.topic,
+            "difficulty": request.difficulty,
+            "has_reference": bool(reference_text),
+            **result
+        }
     except Exception as e:
         print(f"Generate test error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -414,25 +344,18 @@ async def handle_summarize_topic(request: SummarizeTopicInput):
         )
         
         detail_map = {
-            "brief": "ngắn gọn trong 2-3 câu",
-            "medium": "đầy đủ với các khái niệm chính",
-            "detailed": "chi tiết với ví dụ và ứng dụng"
+            "brief": "ngắn gọn",
+            "medium": "đầy đủ",
+            "detailed": "chi tiết"
         }
         
-        detail_instruction = detail_map.get(request.detail_level, detail_map["medium"])
+        detail_instruction = detail_map.get(request.detail_level, "đầy đủ")
         
-        prompt = f"""Tóm tắt {detail_instruction} về chủ đề toán học: "{request.topic}"
-
-Bao gồm:
-- Định nghĩa chính
-- Công thức quan trọng (LaTeX)
-- Tính chất cơ bản
-- Phương pháp giải
-- Lưu ý quan trọng
+        prompt = f"""Tóm tắt {detail_instruction} về: "{request.topic}"
 
 Trả về JSON:
 {{
-  "summary": "Nội dung tóm tắt markdown với LaTeX"
+  "summary": "Nội dung tóm tắt"
 }}"""
         
         response = model.generate_content(prompt)
@@ -452,7 +375,7 @@ async def handle_geogebra(request: GeogebraInputSchema):
     """Generate GeoGebra commands"""
     try:
         generation_config = {
-            "temperature": 0.3,  # Thấp để output chính xác
+            "temperature": 0.3,
             "response_mime_type": "application/json",
         }
         
@@ -462,33 +385,32 @@ async def handle_geogebra(request: GeogebraInputSchema):
             system_instruction=GEOGEBRA_SYSTEM_INSTRUCTION
         )
         
-        prompt = f"""Tạo lệnh GeoGebra cho yêu cầu sau: {request.request}
+        prompt = f"""Tạo lệnh GeoGebra cho: {request.request}
 
-Loại đồ thị: {request.graph_type}
-
-Trả về JSON format chính xác:
+Trả về JSON:
 {{
-  "commands": ["command1", "command2", ...]
-}}
-
-Chỉ trả về các lệnh GeoGebra hợp lệ, không thêm giải thích."""
+  "commands": ["command1", "command2"]
+}}"""
         
         response = model.generate_content(prompt)
         result = json.loads(response.text)
         
-        # Validate response has commands array
         if "commands" not in result or not isinstance(result["commands"], list):
-            raise ValueError("Invalid response format: missing 'commands' array")
+            raise ValueError("Invalid response format")
         
         return result
         
-    except json.JSONDecodeError as e:
-        print(f"JSON decode error: {e}")
-        print(f"Response text: {response.text}")
-        raise HTTPException(status_code=500, detail="Failed to parse AI response as JSON")
     except Exception as e:
         print(f"Geogebra error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
+    print("\n" + "="*60)
+    print("🚀 Starting Math Tutor API Server")
+    print("="*60)
+    print(f"📁 Exercises folder: {EXERCISES_FOLDER}")
+    print(f"📁 Tests folder: {TESTS_FOLDER}")
+    print("\n⚠️  NOTE: Place your PDF files in these folders")
+    print("="*60 + "\n")
+    
     uvicorn.run(app, host="0.0.0.0", port=8000)
