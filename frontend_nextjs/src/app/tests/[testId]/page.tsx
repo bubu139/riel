@@ -29,19 +29,25 @@ export default function TestPage() {
             setIsLoading(true);
             setError(null);
             try {
-                // --- THAY ĐỔI URL FETCH ĐẾN BACKEND PYTHON ---
+                
+                // SỬA: Thêm difficulty vào body
                 const response = await fetch(`${API_BASE_URL}/api/generate-test`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ topic }),
+                    body: JSON.stringify({ topic, difficulty: 'medium' }),  // Explicit difficulty
                 });
-                // --- KẾT THÚC THAY ĐỔI ---
                 
                 if (!response.ok) {
                     const errorData = await response.json();
                     throw new Error(errorData.detail || errorData.error || 'Không thể tạo đề thi.');
                 }
                 const data = await response.json();
+
+                // SỬA: Check data.test tồn tại, fallback nếu không
+                if (!data.test) {
+                    console.warn("No 'test' key in response:", data);
+                    throw new Error('Dữ liệu đề thi không hợp lệ từ server.');
+                }
                 setTest(data.test);
             } catch (err: any) {
                 console.error("Error fetching test:", err);
@@ -79,6 +85,9 @@ export default function TestPage() {
                         throw new Error(errorData.detail || errorData.error || 'Không thể tạo đề thi.');
                     }
                     const data = await response.json();
+                    if (!data.test) {
+                        throw new Error('Dữ liệu đề thi không hợp lệ từ server.');
+                    }
                     setTest(data.test);
                 } catch (err: any) {
                     console.error("Error fetching test:", err);
